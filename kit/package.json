@@ -1,0 +1,9 @@
+{
+  "name": "zhenshi-kaiguan-kit",
+  "private": true,
+  "type": "module",
+  "description": "真实感开关：三个示例场景和逐帧截图脚本",
+  "dependencies": {
+    "playwright-core": "^1.48.0"
+  }
+}

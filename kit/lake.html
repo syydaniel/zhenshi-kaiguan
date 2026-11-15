@@ -1,0 +1,287 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;background:#000;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+#lab{position:fixed;left:4.2vw;bottom:6vh;color:#fff;font-family:"PingFang SC","Helvetica Neue",sans-serif;
+  text-shadow:0 2px 14px rgba(0,0,0,.55);display:flex;align-items:baseline;gap:1.6vw}
+#num{font:700 7.2vh/1 Menlo,monospace;color:#FFE14A}
+#txt{font-weight:600;font-size:4.4vh;letter-spacing:.04em}
+</style>
+</head><body><canvas id="c"></canvas>
+<div id="lab"><span id="num"></span><span id="txt"></span></div>
+<script>
+// 真实感开关实验 · 场景二：群山之间的湖。同一条船、同一个镜头，逐级打开渲染手法。
+// 地形在加载时烘焙成一张高度图（BAKE），之后每一帧只查表；没有任何外部素材。
+const NOISE = `
+float h21(vec2 p){ uvec2 q = uvec2(ivec2(floor(p))+ivec2(32768)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 15; n *= 2246822519u; n ^= n >> 13;
+  return float(n) * (1./4294967295.); }
+float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*f*(f*(f*6.-15.)+10.);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),f.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x), f.y); }
+float fbm(vec2 p){ float a=.5, s=0.; for(int i=0;i<5;i++){ s+=a*vnoise(p); p=mat2(1.6,-1.2,1.2,1.6)*p+17.3; a*=.5; } return s; }
+`;
+const BAKE = NOISE + `
+uniform float SZ; out vec4 o;
+const float EXT = 220.;
+float base(vec2 p){
+  vec2 q = (p - vec2(0.,-2.))*vec2(1.,.45);
+  float d = length(q), rise = smoothstep(6.5, 30., d);
+  float m=0., a=.5, f=.03, w=1.; vec2 x = p + vec2(31.7,12.3);
+  for(int i=0;i<12;i++){ float n = 1.-abs(2.*vnoise(x*f)-1.); n*=n; m += a*n*w; w = clamp(n*1.5,0.,1.); a*=.47; f*=2.07; x = mat2(.8,-.6,.6,.8)*x + 3.1; }
+  float h = -1.6 + rise*(1.2 + m*27.);
+  h += smoothstep(5.,8.5,d)*(1.-rise)*(vnoise(p*.35)-.35)*1.3;                       // 岸边的起伏
+  vec2 pk = p - vec2(-7.,-58.); h += 15.*exp(-dot(pk,pk)/330.)*(.5+1.1*m);          // 正前方的主峰
+  return h;
+}
+void main(){
+  vec2 p = (gl_FragCoord.xy/SZ - .5)*EXT;
+  float h = base(p), e = .3;
+  float slope = length(vec2(base(p+vec2(e,0.))-base(p-vec2(e,0.)), base(p+vec2(0.,e))-base(p-vec2(0.,e))))/(2.*e);
+  // 树：在缓坡、低处，按格子随机撒圆锥，直接长进高度图里，所以它们有轮廓、有影子
+  float veg = smoothstep(1.15,.6,slope)*smoothstep(.22,.55,h)*smoothstep(9.5,4.5,h+(vnoise(p*.3)-.5)*5.)*smoothstep(.30,.50,vnoise(p*.7+40.)+.12);
+  vec2 g = p/.33, id = floor(g); float tree = 0.;
+  for(int j=-1;j<=1;j++) for(int i=-1;i<=1;i++){ vec2 c = id+vec2(float(i),float(j)); if(h21(c+23.)>.78) continue;
+    vec2 oc = c+.15+.7*vec2(h21(c),h21(c+17.)); float d = length(g-oc)/(.42+.25*h21(c+5.));
+    tree = max(tree, (.55+.75*h21(c+9.))*(1.-d)); }
+  tree = max(tree,0.)*veg*.78;
+  h += tree;
+  for(int i=0;i<5;i++){ vec2 rc = vec2((mod(float(i),2.)<.5 ? -1. : 1.)*(2.7+.5*float(i)+1.8*h21(vec2(float(i),7.))), 3.6 - 3.1*float(i) + 2.*h21(vec2(float(i),3.)));   // 石头摆在航线两边，船不会撞上   // 水里露头的石头
+    float rr = .35+.3*h21(vec2(float(i),11.)); float dd = length(p-rc)/rr; h = max(h, (.42*rr+.25)*(1.-dd*dd) - .05 + .1*vnoise(p*6.)); }
+  o = vec4(h, clamp(tree*5.,0.,1.), 0., 1.);
+}`;
+const FS = NOISE + `
+uniform vec2 R; uniform float T, LA, LB, W, FR; uniform int NS; uniform sampler2D HM;
+out vec4 o;
+const float FPS = 24., EXT = 220.;
+const vec3 SUN = normalize(vec3(-.80,.40,.16));
+const vec3 SUNC = vec3(1.,.85,.64)*5.2;
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+float hpx(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+
+#ifdef MANUAL_BILINEAR
+float H(vec2 p){ vec2 u = (p/EXT+.5)*HMSZ - .5; ivec2 i = ivec2(floor(u)); vec2 f = fract(u);
+  return mix(mix(texelFetch(HM,i,0).r, texelFetch(HM,i+ivec2(1,0),0).r, f.x), mix(texelFetch(HM,i+ivec2(0,1),0).r, texelFetch(HM,i+ivec2(1,1),0).r, f.x), f.y); }
+#else
+float H(vec2 p){ return textureLod(HM, p/EXT+.5, 0.).r; }
+#endif
+float TREE(vec2 p){ return texelFetch(HM, ivec2((p/EXT+.5)*HMSZ), 0).g; }
+
+// ---- 镜头和船：都是 t 的闭式函数
+vec3 camP(float t){ return vec3(.5*sin(t*.21), .235+.012*sin(t*1.7), 10.5-1.15*t); }
+float sdEll(vec3 p, vec3 r){ float k0=length(p/r), k1=length(p/(r*r)); return k0*(k0-1.)/k1; }
+float sdBox(vec3 p, vec3 b){ vec3 q=abs(p)-b; return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.); }
+vec2 boat(vec3 p, float t){                       // 返回（距离，部件）：1 船壳 2 横板 3 缆绳
+  vec3 c = camP(t); vec3 q = p - vec3(c.x, .0+.012*sin(t*1.7), c.z);
+  q.xy = rot(.025*sin(t*1.1))*q.xy;
+  vec3 e = q - vec3(0.,.03,-.42);
+  float outer = sdEll(e, vec3(.27,.15,1.05)), inner = sdEll(e-vec3(0.,.045,0.), vec3(.235,.15,.99));
+  float hull = max(max(outer, -inner), q.y-.085);
+  vec2 d = vec2(hull, 1.);
+  float seat = sdBox(q-vec3(0.,.055,-.62), vec3(.22,.008,.06)); seat = max(seat, outer); if(seat<d.x) d = vec2(seat,2.);
+  vec3 r = q - vec3(.0,.045,-1.12); float coil = length(vec2(length(r.xz)-.055, r.y))-.014; if(coil<d.x) d = vec2(coil,3.);
+  return d;
+}
+vec3 boatN(vec3 p, float t){ vec2 e=vec2(1.,-1.)*.0008;
+  return normalize(e.xyy*boat(p+e.xyy,t).x + e.yyx*boat(p+e.yyx,t).x + e.yxy*boat(p+e.yxy,t).x + e.xxx*boat(p+e.xxx,t).x); }
+// 一群鸟：从右往左横穿画面，翅膀在扇
+float birds(vec3 p, float t, out float wing){
+  float d = 1e9; wing = 0.;
+  vec3 c = camP(t);
+  for(int i=0;i<9;i++){ float fi=float(i), a=hpx(vec2(fi,1.3)), b=hpx(vec2(fi,2.7)), g=hpx(vec2(fi,5.1));
+    float ph = t*.5 + a*.35;
+    vec3 bp = vec3(c.x + 9. - 13.*fract(ph*.34+.2) + (b-.5)*1.6, 1.25+g*.9+.12*sin(t*2.+fi), c.z - 6.5 - a*4.);
+    vec3 q = p - bp; if(dot(q,q) > .16){ d = min(d, length(q)-.25); continue; }
+    float fl = sin(t*11.+fi*2.1)*.75;
+    float body = sdEll(q, vec3(.075,.022,.026));
+    vec3 w = q; w.z = abs(w.z); w.yz = rot(-fl)*w.yz; float wg = sdEll(w-vec3(.0,0.,.075), vec3(.034,.006,.085));
+    if(wg<body) wing = 1.; d = min(d, min(body, wg)); }
+  return d;
+}
+
+float castT(vec3 ro, vec3 rd, float tmax, int steps){
+  float t = .02;
+  for(int i=0;i<220;i++){ if(i>=steps) break; vec3 p = ro+rd*t; float h = p.y - H(p.xz);
+    if(h < .0015*t) return t; t += max(h*.34, .004*t); if(t>tmax) break; }
+  return -1.;
+}
+vec3 terrN(vec3 p, float t){ float e = max(.075, .0022*t);
+  return normalize(vec3(H(p.xz-vec2(e,0.))-H(p.xz+vec2(e,0.)), 2.*e, H(p.xz-vec2(0.,e))-H(p.xz+vec2(0.,e)))); }
+float shadowT(vec3 p, float soft){                // 朝太阳走一段，看有没有被山挡住
+  float s = 1., t = .12;
+  for(int i=0;i<56;i++){ vec3 q = p + SUN*t; float h = q.y - H(q.xz);
+    if(soft>.5) s = min(s, .25+12.*h/t); else if(h<.0) return 0.;
+    t += clamp(h*.6, .06, 3.); if(s<.005 || q.y>34.) break; }
+  return clamp(s,0.,1.);
+}
+float aoT(vec3 p){ float h = H(p.xz), o = 0.;
+  for(int i=0;i<6;i++){ float a = float(i)*1.047; vec2 dv = vec2(cos(a), sin(a)); o += max(H(p.xz+dv*.5)-h-.12, 0.)*1.1 + max(H(p.xz+dv*2.2)-h-.9, 0.)*.28; }
+  return clamp(1.-o*.13, .25, 1.); }
+
+vec3 sky(vec3 rd, float lvl, float t){
+  if(lvl<1.) return vec3(.86,.89,.90);
+  if(lvl<3.) return vec3(.45,.62,.84);
+  float y = max(rd.y,0.), s = max(dot(rd,SUN),0.);
+  vec3 c = mix(vec3(.74,.82,.92), vec3(.10,.30,.74), pow(y,.42));
+  c += vec3(1.,.70,.40)*(.30*pow(s,5.) + .8*pow(s,48.));
+  c += vec3(1.,.96,.88)*30.*smoothstep(.9993,.9998,s);
+  if(rd.y>.012){ vec2 cp = rd.xz/(rd.y+.10)*1.25 + vec2(t*.012,0.);
+    float cl = smoothstep(.40,.70, fbm(cp*.55)+.25*fbm(cp*2.3)-.10);
+    float lit = fbm(cp*.55 + SUN.xz*.35);
+    vec3 cc = mix(vec3(.52,.58,.70), vec3(1.,.95,.88), smoothstep(.62,.35,lit)) + vec3(1.,.6,.3)*.5*pow(s,6.);
+    c = mix(c, cc, cl*.82*smoothstep(.012,.14,rd.y)); }
+  return c;
+}
+vec3 skyAmb(vec3 n){ return mix(vec3(.26,.22,.18), vec3(.34,.48,.74), .5+.5*n.y)*.95; }
+
+vec3 shadeTerr(vec3 p, float dist, float lvl){
+  float h = p.y; vec3 n = terrN(p, dist);
+  if(lvl<1.){                                                           // 0 平涂：按高度分层上色，像等高线地图
+    float b = (h+.2)/2.4, k = floor(b);
+    vec3 c = mix(vec3(.62,.76,.55), vec3(.86,.84,.62), clamp(k/3.,0.,1.));
+    c = mix(c, vec3(.78,.62,.46), clamp((k-3.)/3.,0.,1.)); c = mix(c, vec3(.96,.96,.97), clamp((k-6.)/2.,0.,1.));
+    float lw = .05*(1.+dist*.035)/max(1.-n.y*n.y, .05);
+    float ln = smoothstep(0., lw, min(fract(b), 1.-fract(b)));
+    return c*mix(.55,1.,ln);
+  }
+  vec3 alb = vec3(.43,.39,.34);
+  if(lvl>=2.){                                                          // 2 贴图：岩层、草木、雪线、湿岸，都是噪声算的
+    float nz = fbm(p.xz*.55), n2 = vnoise(p.xz*7.)*.6+vnoise(p.xz*23.)*.4;
+    float st = fbm(vec2(h*2.6+nz*3.5, dot(p.xz, vec2(.21,.13))));
+    vec3 rock = mix(vec3(.30,.27,.25), vec3(.60,.53,.45), st); rock *= .72+.56*n2;
+    float veg = smoothstep(.70,.90, n.y+(nz-.5)*.25)*smoothstep(8.5,3.5, h+nz*3.5);
+    vec3 green = mix(vec3(.07,.15,.045), vec3(.27,.31,.10), smoothstep(.2,.8,n2*.7+nz*.3));
+    alb = mix(rock, green, veg);
+    float tr = TREE(p.xz); alb = mix(alb, mix(vec3(.035,.085,.04), vec3(.12,.20,.07), n2), tr);
+    float snow = smoothstep(.50,.78, n.y+(n2-.5)*.3)*smoothstep(8.5,11.5, h+nz*5.);
+    alb = mix(alb, vec3(.90,.93,.98), snow);
+    alb *= mix(.45,1.,smoothstep(.0,.30,h));
+    float e = .05; vec2 g = vec2(vnoise((p.xz+vec2(e,0.))*9.)-vnoise((p.xz-vec2(e,0.))*9.), vnoise((p.xz+vec2(0.,e))*9.)-vnoise((p.xz-vec2(0.,e))*9.));
+    n = normalize(n + vec3(-g.x,0.,-g.y)*1.6*(1.-snow*.7));
+  }
+  float ndl = max(dot(n,SUN),0.);
+  float sh = ndl>0. ? shadowT(p+n*.10+vec3(0.,.04,0.), lvl>=4.?1.:0.) : 0.;
+  vec3 col = alb*SUNC*ndl*sh*.32;
+  if(lvl>=3.) col += alb*skyAmb(n)*(lvl>=4. ? aoT(p) : 1.)*.55;
+  return col;
+}
+vec3 air(vec3 col, vec3 ro, vec3 rd, float dist, float lvl){           // 「空气」：越远越淡、越蓝，逆光的方向发暖
+  if(lvl<5.) return col;
+  float k = .11, ry = abs(rd.y)<1e-3 ? 1e-3 : rd.y;
+  float fo = .0085*exp(-ro.y*k)*(1.-exp(-dist*ry*k))/(ry*k);
+  float ext = exp(-fo), s = max(dot(rd,SUN),0.);
+  vec3 fc = mix(vec3(.46,.60,.84), vec3(1.,.84,.62), .7*pow(s,4.));
+  return col*ext + fc*(1.-ext);
+}
+
+vec3 shadeBoat(vec3 p, vec3 rd, float id, float t, float lvl){
+  vec3 n = boatN(p,t); vec3 c = camP(t); vec3 q = p-vec3(c.x,0.,c.z);
+  vec3 alb = id<1.5 ? vec3(.50,.30,.15) : id<2.5 ? vec3(.58,.40,.22) : vec3(.72,.66,.52);
+  if(lvl<1.) return alb;
+  if(lvl>=2.){
+    if(id<2.5){ float pl = fract(q.x*11.+.5*step(.5,fract(q.z*1.3))); float g = fbm(vec2(q.x*40., q.z*6.+floor(q.x*11.)*3.));
+      alb = mix(vec3(.50,.30,.14), vec3(.24,.13,.06), smoothstep(.3,.8,g)); alb *= mix(.35,1.,smoothstep(0.,.07,min(pl,1.-pl)));
+      alb = mix(alb, vec3(.30,.36,.34), .35*smoothstep(.55,.9,vnoise(q.xz*vec2(30.,8.))));               // 掉漆、发灰的地方
+      n = normalize(n + vec3((g-.5)*.25, 0., 0.)); }
+    else { float tw = fract(atan(q.x, q.z+1.12)*9.+length(q)*40.); alb *= .7+.5*smoothstep(.2,.8,tw); }
+  }
+  float ndl = max(dot(n,SUN),0.);
+  float sh = shadowT(p+n*.01, lvl>=4.?1.:0.);
+  float s2 = 1., d = .01; for(int i=0;i<22;i++){ float hh = boat(p+n*.004+SUN*d, t).x; if(lvl>=4.) s2 = min(s2, 10.*hh/d); else if(hh<.0008){ s2=0.; break; } d += clamp(hh,.006,.08); if(d>.9) break; }
+  sh *= clamp(s2,0.,1.);
+  vec3 col = alb*SUNC*ndl*sh*.32;
+  if(lvl>=3.){ float occ = 1.;
+    if(lvl>=4.){ float o2=0., sc=1.; for(int i=1;i<=4;i++){ float hh=.012*float(i); o2 += (hh-boat(p+n*hh,t).x)*sc; sc*=.7; } occ = clamp(1.-9.*o2,0.,1.); }
+    col += alb*skyAmb(n)*occ*.55;
+    float F = .04+.96*pow(1.-max(dot(n,-rd),0.),5.); col += F*sky(reflect(rd,n), lvl, t)*.22*occ; }
+  return col;
+}
+
+vec3 waterN(vec3 p, float t, float dist){
+  float e = .012 + .002*dist, amp = 1./(1.+dist*.09);
+  #define WH(q) (vnoise((q)*3.1+vec2(t*.55,t*.3))*.5 + vnoise((q)*8.3-vec2(t*.8,t*.45))*.22 + vnoise((q)*21.+vec2(t*1.3,-t))*.08)
+  float h0 = WH(p.xz), hx = WH(p.xz+vec2(e,0.)), hz = WH(p.xz+vec2(0.,e));
+  // 船头推开的两道水波
+  return normalize(vec3(-(hx-h0)/e*.05*amp, 1., -(hz-h0)/e*.05*amp));
+}
+
+vec3 shade(vec3 ro, vec3 rd, float t, float lvl){
+  // 近处的东西：船和鸟（球面追踪）
+  float tb = -1., bid = 0.;
+  { float d = .05; for(int i=0;i<48;i++){ vec2 h = boat(ro+rd*d, t); if(h.x<.0006){ tb = d; bid = h.y; break; } d += h.x; if(d>2.6) break; } }
+  float tw = rd.y<0. ? -ro.y/rd.y : 1e9;
+  float tbird = -1., wing = 0.;
+  { float d = 4.; for(int i=0;i<40;i++){ float w; float h = birds(ro+rd*d, t, w); if(h<.003){ tbird = d; wing = w; break; } d += h; if(d>16.) break; } }
+  float tt = castT(ro, rd, min(tw, 190.), 200);
+  float tsurf = tt>0. ? tt : (tw<1e8 ? tw : -1.);
+  if(tb>0. && (tsurf<0. || tb<tsurf)) return shadeBoat(ro+rd*tb, rd, bid, t, lvl);
+  if(tbird>0. && (tsurf<0. || tbird<tsurf)){
+    vec3 bc = lvl<1. ? vec3(.25,.25,.28) : vec3(.05,.05,.06)*(1.+2.*max(dot(SUN,vec3(0.,1.,0.)),0.)*(lvl>=3.?1.:.4));
+    return air(bc, ro, rd, tbird, lvl); }
+  if(tsurf<0.) return sky(rd, lvl, t);
+  vec3 p = ro+rd*tsurf;
+  if(tt>0.) return air(shadeTerr(p, tt, lvl), ro, rd, tt, lvl);
+  // ---- 水面
+  if(lvl<1.) return vec3(.47,.70,.86);
+  float depth = -H(p.xz);
+  float sh = shadowT(p+vec3(0.,.02,0.), lvl>=4.?1.:0.);
+  // 船在水上的影子
+  { float d=.02, s2=1.; for(int i=0;i<16;i++){ float hh = boat(p+SUN*d, t).x; if(lvl>=4.) s2=min(s2, 8.*hh/d); else if(hh<.001){ s2=0.; break; } d+=clamp(hh,.02,.2); if(d>1.6) break; } sh *= clamp(s2,0.,1.); }
+  vec3 base = vec3(.10,.28,.42);
+  if(lvl<3.) return air(base*SUNC*SUN.y*sh*.32 + base*.012, ro, rd, tsurf, lvl);
+  vec3 n = waterN(p, t, tsurf);
+  vec3 r = reflect(rd, n); r.y = abs(r.y)+.002; r = normalize(r);
+  float tr = castT(p+vec3(0.,.01,0.), r, 150., 90);
+  vec3 refl = tr>0. ? air(shadeTerr(p+r*tr, tsurf+tr, lvl), p, r, tr, lvl) : sky(r, lvl, t);
+  { float d=.03; for(int i=0;i<20;i++){ vec2 hh = boat(p+r*d, t); if(hh.x<.002){ refl = vec3(.10,.06,.03); break; } d+=hh.x; if(d>1.4) break; } }
+  float F = .02+.98*pow(1.-max(dot(n,-rd),0.),5.);
+  vec3 bottom = mix(vec3(.30,.27,.20), vec3(.16,.20,.16), vnoise(p.xz*5.));
+  vec3 body = mix(bottom*vec3(.55,.85,.80), vec3(.012,.06,.085), smoothstep(.0,1.3,depth));
+  body *= (SUNC*SUN.y*sh*.32 + skyAmb(vec3(0.,1.,0.))*.6);
+  float foam = lvl>=2. ? smoothstep(.05,.0,depth)*.5 : 0.;
+  vec3 col = mix(body, refl, F) + foam*vec3(.8,.85,.9)*(.3+sh);
+  vec3 hv = normalize(SUN-rd); col += SUNC*sh*pow(max(dot(n,hv),0.), 900.)*6.*F;
+  return air(col, ro, rd, tsurf, lvl);
+}
+
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+  float lvl = fc.x<W ? LB : LA;
+  float ign = fract(52.9829189*fract(dot(fc+FR*vec2(5.588,3.1), vec2(.06711056,.00583715))));
+  float rnd = hpx(fc+FR*1.7);
+  vec3 acc = vec3(0.); float fn = float(NS);
+  for(int i=0;i<96;i++){ if(i>=NS) break;
+    float fi = float(i);
+    float u1 = fract(ign+fi*.61803398875), u2 = fract(rnd+fi*.7548776662);
+    vec2 uv = ((fc+vec2(u1,u2)-.5)*2.-R)/R.y;
+    float t = T; if(lvl>=7.) t += ((fi+u2)/fn)*(.5/FPS);               // 运动模糊：180° 快门内取多个时间点
+    vec3 ro = camP(t), fw = normalize(vec3(-.10+.05*sin(t*.17), .105, -1.)), rt = normalize(cross(fw, vec3(0,1,0))), up = cross(rt,fw);
+    rt = rt*cos(.02*sin(t*1.1)) + up*sin(.02*sin(t*1.1)); up = cross(rt,fw);
+    vec3 rd = normalize(uv.x*rt + uv.y*up + 1.75*fw);
+    if(lvl>=6.){                                                       // 景深：焦点在远处的山，船头是虚的
+      float rr = sqrt((fi+.5)/fn), ang = fi*2.39996323+ign*6.2831853;
+      vec2 lens = .008*rr*vec2(cos(ang), sin(ang));
+      vec3 fp = ro + rd*(30./dot(rd,fw));
+      ro += rt*lens.x + up*lens.y; rd = normalize(fp-ro); }
+    acc += min(shade(ro, rd, t, lvl), vec3(20.));
+  }
+  vec3 col = acc/fn;
+  vec2 uv0 = (fc*2.-R)/R.y;
+  if(lvl>=1.) col *= .62;
+  if(lvl>=8.){                                                         // 冲洗：色调映射、调色、暗角、颗粒
+    col *= 1.30; col = col*(2.51*col+.03)/(col*(2.43*col+.59)+.14);
+    col = pow(clamp(col,0.,1.), vec3(1./2.2));
+    col = mix(col, col*col*(3.-2.*col), .75);
+    float lum = dot(col, vec3(.299,.587,.114));
+    col = mix(vec3(lum), col, 1.22);
+    col *= mix(vec3(.93,.99,1.07), vec3(1.07,1.01,.92), smoothstep(.15,.8,lum));          // 暗部偏冷，亮部偏暖
+    col *= 1.-.30*dot(uv0*.52, uv0*.52);
+    col += (hpx(fc+FR*9.13)-.5)*.03;
+  } else col = pow(clamp(col,0.,1.), vec3(1./2.2));
+  if(W>0. && W<R.x && abs(fc.x-W)<1.5) col = vec3(1.);
+  o = vec4(col,1.);
+}`;
+window.SCENE = { FS, BAKE, BAKE_SIZE: 4096, SEG: 2.4,
+  NAMES: ['平涂：像一张等高线地图', '加直射光和阴影', '加程序化贴图', '加天光和水面反射', '加软阴影和遮蔽', '加空气', '加景深', '加运动模糊', '加色调映射和颗粒'] };
+</script>
+<script src="harness.js"></script>
+</body></html>

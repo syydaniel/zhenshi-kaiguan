@@ -1,0 +1,324 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;background:#000;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+#lab{position:fixed;left:4.2vw;bottom:6vh;color:#fff;font-family:"PingFang SC","Helvetica Neue",sans-serif;
+  text-shadow:0 2px 14px rgba(0,0,0,.55);display:flex;align-items:baseline;gap:1.6vw}
+#num{font:700 7.2vh/1 Menlo,monospace;color:#FFE14A}
+#txt{font-weight:600;font-size:4.4vh;letter-spacing:.04em}
+</style>
+</head><body><canvas id="c"></canvas>
+<div id="lab"><span id="num"></span><span id="txt"></span></div>
+<script>
+// 真实感开关实验 · 场景三：机器停摆之后的城市。一台几十层楼高的机甲站在废墟中间，同一个镜头逐级打开渲染手法。
+// 全部是有符号距离场（SDF）加光线步进，没有任何外部素材。
+const FS = `
+uniform vec2 R; uniform float T, LA, LB, W, FR; uniform int NS;
+out vec4 o;
+const float FPS = 24.;
+const vec3 SUN = normalize(vec3(.11,.37,-.92));
+const vec3 SUNC = vec3(1.,.72,.45)*6.;
+const vec3 MP = vec3(0.,0.,-46.); const float MS = 1.25;                      // 机甲站的位置
+
+float h21(vec2 p){ uvec2 q = uvec2(ivec2(floor(p))+ivec2(32768)) * uvec2(1597334673u, 3812015801u); uint n = (q.x ^ q.y) * 1597334673u; n ^= n >> 15; n *= 2246822519u; n ^= n >> 13;
+  return float(n) * (1./4294967295.); }
+float hpx(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),f.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x), f.y); }
+float fbm(vec2 p){ float a=.5, s=0.; for(int i=0;i<4;i++){ s+=a*vnoise(p); p=mat2(1.6,-1.2,1.2,1.6)*p+17.3; a*=.5; } return s; }
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+float sdBox(vec3 p, vec3 b){ vec3 q=abs(p)-b; return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.); }
+float sdRBox(vec3 p, vec3 b, float r){ return sdBox(p, b-r)-r; }
+float sdCyl(vec3 p, float r, float h){ vec2 d=abs(vec2(length(p.xz),p.y))-vec2(r,h); return min(max(d.x,d.y),0.)+length(max(d,0.)); }
+float sdCap(vec3 p, vec3 a, vec3 b, float r){ vec3 pa=p-a, ba=b-a; return length(pa-ba*clamp(dot(pa,ba)/dot(ba,ba),0.,1.))-r; }
+float sdEll(vec3 p, vec3 r){ float k0=length(p/r), k1=length(p/(r*r)); return k0*(k0-1.)/k1; }
+
+vec3 camP(float t){ return vec3(1.5+.35*sin(t*.31), 1.05+.035*sin(t*1.9), 15.-.95*t); }
+
+// ---- 机甲：几十个盒子、圆柱和胶囊拼起来。部件：2 装甲 3 关节和骨架 4 缆线
+#define U(dd,idd) if((dd)<d.x) d=vec2(dd,idd)
+vec2 mech(vec3 p){
+  float bb = sdBox(p-vec3(0.,19.,0.), vec3(13.5,20.,7.)); if(bb>1.5) return vec2(bb,2.);
+  vec2 d = vec2(1e9,2.); float a;
+  vec3 q = p; q.x = abs(q.x);
+  a = sdRBox(q-vec3(4.2,1.0,.9), vec3(2.3,1.0,3.7), .25); U(a,2.);                       // 脚
+  a = sdRBox(q-vec3(4.2,1.6,3.6), vec3(1.7,.7,1.3), .2); U(a,3.);
+  a = sdRBox(q-vec3(4.2,6.2,0.), vec3(1.75,4.3,2.0), .3); U(a,2.);                       // 小腿
+  a = sdRBox(q-vec3(4.2,6.6,2.0), vec3(1.2,3.0,.5), .2); U(a,2.);
+  a = sdCyl((q-vec3(4.2,10.7,.2)).yxz, 2.05, 1.95); U(a,3.);                             // 膝
+  a = sdRBox(q-vec3(4.2,11.0,2.3), vec3(1.55,1.7,.55), .25); U(a,2.);                    // 护膝
+  a = sdRBox(q-vec3(4.2,3.4,0.), vec3(2.15,1.5,2.5), .3); U(a,2.);                       // 脚踝外扩的护甲
+  a = sdRBox(q-vec3(3.9,14.6,0.), vec3(1.95,3.3,2.2), .3); U(a,2.);                      // 大腿
+  a = sdRBox(q-vec3(6.0,15.2,0.), vec3(.5,2.4,1.6), .2); U(a,2.);
+  a = sdRBox(p-vec3(0.,18.7,0.), vec3(5.5,1.5,2.7), .3); U(a,3.);                        // 胯
+  a = sdRBox(p-vec3(0.,18.2,2.6), vec3(1.6,1.9,.6), .2); U(a,2.);
+  vec3 u = p-vec3(0.,20.2,0.); u.yz = rot(-.12)*u.yz; vec3 uq = u; uq.x = abs(uq.x);     // 上身往前塌着
+  a = sdRBox(u-vec3(0.,1.,0.), vec3(2.7,1.3,2.1), .3); U(a,3.);                          // 腰
+  a = sdRBox(u-vec3(0.,5.6,.2), vec3(6.3,3.7,3.4), .6); U(a,2.);                         // 胸
+  a = sdRBox(u-vec3(0.,6.1,3.5), vec3(3.9,2.3,.8), .3); U(a,2.);                         // 胸甲
+  a = sdRBox(uq-vec3(3.2,3.0,3.0), vec3(1.1,1.0,.7), .2); U(a,3.);                       // 进气口
+  { vec3 s = uq-vec3(9.0,8.1,0.); s.xy = rot(.28)*s.xy; a = sdRBox(s, vec3(3.1,2.0,3.2), .6); U(a,2.);            // 肩甲，外沿往下压
+    a = sdRBox(s-vec3(.6,2.2,0.), vec3(2.0,.5,2.4), .25); U(a,2.); }
+  a = sdCap(u, vec3(7.6,10.6,-1.2), vec3(8.6,7.4,8.6), .62); U(a,3.); a = sdCyl((u-vec3(7.6,10.4,-1.4)), 1.25, 1.0); U(a,3.);   // 肩上的炮，炮口垂着
+  a = sdRBox(vec3(uq.x-4.3, u.y-9.6, u.z+4.4), vec3(.32,3.3,1.7), .15); U(a,2.);                                    // 背后的两片翼板
+  a = sdRBox(uq-vec3(9.4,2.9,0.), vec3(1.5,3.1,1.6), .3); U(a,3.);                       // 上臂
+  a = length(uq-vec3(9.4,-.8,0.))-1.75; U(a,3.);                                         // 肘
+  { vec3 f = u-vec3(9.6,-5.2,.7); a = sdRBox(f, vec3(1.75,3.6,1.95), .3); U(a,2.);       // 前臂只剩一边
+    a = sdRBox(f-vec3(0.,-4.9,.2), vec3(1.3,1.3,1.5), .3); U(a,3.); }
+  { vec3 f = u-vec3(-9.4,-1.,0.); a = sdCap(f, vec3(0.,-1.,0.), vec3(.5,-6.,.4), .24); U(a,4.);   // 另一边垂着断掉的缆
+    a = sdCap(f, vec3(.6,-1.,.5), vec3(-.4,-4.,.6), .17); U(a,4.); a = sdCap(f, vec3(-.5,-1.,-.3), vec3(-.2,-7.2,.1), .13); U(a,4.); }
+  a = sdCyl(vec3(uq.x-2.9, u.y-7.4, u.z+3.9), 1.35, 3.5); U(a,3.);                       // 背上的两个罐
+  a = sdRBox(u-vec3(0.,10.1,.2), vec3(1.3,.9,1.3), .2); U(a,3.);                         // 脖子
+  vec3 hd = u-vec3(0.,11.2,.4); hd.yz = rot(-.36)*hd.yz;                                 // 头低着
+  a = sdRBox(hd-vec3(0.,1.3,.5), vec3(2.0,1.45,2.1), .35);
+  a = max(a, -sdBox(hd-vec3(0.,1.2,2.6), vec3(1.5,.26,.6))); U(a,2.);                    // 一道眼缝
+  a = sdCap(hd, vec3(1.6,2.5,-.8), vec3(2.1,6.2,-1.7), .09); U(a,4.);                    // 天线
+  { vec3 f = hd-vec3(0.,3.0,1.3); f.x = abs(f.x); f.xy = rot(-.75)*f.xy; a = sdRBox(f-vec3(0.,1.0,0.), vec3(.22,1.5,.16), .08); U(a,2.); }   // 额头上的 V 形角
+  return d;
+}
+
+// ---- 楼：沿街两排、后面再两排。每一格一栋，高矮宽窄按格子编号随机，顶上被啃掉一块
+float bldRow(vec3 p, float s, float k, out vec3 bid){
+  float cz = 11.+k*6., x0 = s*(9.6+k*13.5);
+  float iz = floor(p.z/cz); vec3 q = p; q.z = p.z-(iz+.5)*cz; q.x -= x0;
+  float r1 = h21(vec2(iz, s*7.+k*3.)), r2 = h21(vec2(iz+31., s*5.+k)), r3 = h21(vec2(iz+77., s+k*9.));
+  float hh = k<.5 ? 3.6+7.5*r1*r1+2.2*r2 : 8.+10.*r1;
+  if(k<.5 && abs((iz+.5)*cz-MP.z)<13.){ bid = vec3(0.); return max(cz*.5-abs(q.z),0.)+.45; }      // 机甲脚下是一片空场
+  vec3 hs = vec3(3.3+1.5*r2+k*1.6, hh, cz*.5-.9-1.3*r3);
+  float d = sdBox(q-vec3(0.,hh,0.), hs);
+  bid = vec3(iz, s, k);
+  if(d>1.2) return min(d, max(cz*.5-abs(q.z), 0.)+.45);          // 离得远就不算缺口的噪声
+  float bite = p.y - (2.*hh - (1.+6.*r3*r3)*smoothstep(.25,.75, vnoise(p.xz*.33+iz*3.7)+.25*vnoise(p.xz*1.3)) - 2.2*r2*vnoise(vec2(p.x*.5+p.z*.5, p.y*.4)));
+  d = max(d, bite*.7);
+  bid = vec3(iz, s, k);
+  return min(d, max(cz*.5-abs(q.z), 0.)+.45);
+}
+float groundH(vec2 p){ float edge = smoothstep(3.6,6.6,abs(p.x))*smoothstep(8.,16.,abs(p.y-MP.z)+abs(p.x)*.3);
+  return fbm(p*.42)*1.3*edge + vnoise(p*1.9)*.10*(.12+edge) + (vnoise(p*6.)-.5)*.02; }
+float chunks(vec3 p){                                   // 散在地上的碎块
+  vec2 id = floor(p.xz/3.2); float d = 1e9;
+  float r = h21(id+3.3); if(r<.38) return 2.;
+  vec3 q = p; q.xz = p.xz-(id+.5)*3.2 - (vec2(h21(id), h21(id+9.1))-.5)*1.6; q.y -= groundH((id+.5)*3.2)+.1;
+  q.xz = rot(r*6.)*q.xz; q.xy = rot((r-.5)*1.2)*q.xy;
+  return min(sdRBox(q, vec3(.25+.6*h21(id+5.), .12+.35*h21(id+7.), .2+.5*h21(id+1.7)), .04), 1.1);
+}
+float cableY(float x, float z0, float y0, float sag, float t){ float u = x/5.6; return y0 - sag*(1.-u*u) + .12*sin(t*1.3+z0)*(1.-u*u); }
+
+vec2 map(vec3 p, float t, out vec3 bid){
+  bid = vec3(0.);
+  vec2 d = p.y>3. ? vec2(p.y-1.6, 0.) : vec2((p.y-groundH(p.xz))*.62, 0.);
+  if(p.y<2.6){ float c = chunks(p); if(c<d.x) d = vec2(c,6.); }
+  vec3 b; float a, s = p.x<0. ? -1. : 1., ax = abs(p.x);
+  // 只算可能比当前更近的那几排楼：街对面的、后排的，离得远就跳过
+  a = bldRow(p, s, 0., b); if(a<d.x){ d = vec2(a,1.); bid = b; }
+  if(ax+4.6 < d.x){ a = bldRow(p, -s, 0., b); if(a<d.x){ d = vec2(a,1.); bid = b; } }
+  if(16.5-ax < d.x){ a = bldRow(p, s, 1., b); if(a<d.x){ d = vec2(a,1.); bid = b; } }
+  if(28.-ax < d.x){ a = bldRow(p, s, 2., b); if(a<d.x){ d = vec2(a,1.); bid = b; } }
+  if(ax+16.5 < d.x){ a = bldRow(p, -s, 1., b); if(a<d.x){ d = vec2(a,1.); bid = b; } a = bldRow(p, -s, 2., b); if(a<d.x){ d = vec2(a,1.); bid = b; } }
+  vec2 m = mech((p-MP)/MS); m.x *= MS; if(m.x<d.x) d = m;
+  // 路灯：沿街每 13 米一根，歪的
+  if(p.y<7.5 && abs(ax-4.7)<3.2){ float iz = floor(p.z/13.); vec3 q = p; q.z = p.z-(iz+.5)*13.; float s = sign(p.x); q.x = abs(p.x)-4.7;
+    float r = h21(vec2(iz, s*3.)); q.xy = rot((r-.5)*.5)*q.xy; q.zy = rot((h21(vec2(iz+5.,s))-.5)*.35)*q.zy;
+    a = sdCap(q, vec3(0.), vec3(0.,5.2,0.), .07); a = min(a, sdCap(q, vec3(0.,5.2,0.), vec3(-1.3,5.5,0.), .05)); a = min(a, sdBox(q-vec3(-1.45,5.5,0.), vec3(.3,.05,.12)));
+    a = min(a, 6.); if(a<d.x) d = vec2(a,4.); }
+  // 横在街上的电缆，会晃
+  if(p.y>1.5 && p.y<9. && ax<6.5) for(int i=0;i<4;i++){ float z0 = 6.5-11.5*float(i), y0 = 8.2-float(i)*.5, sag = 2.0+float(i)*.4;
+    float cy = cableY(p.x, z0, y0, sag, t); a = (length(vec2(p.y-cy, p.z-z0))-.035)*.7; a = max(a, abs(p.x)-5.6); if(a<d.x) d = vec2(a,4.); }
+  // 两辆废车
+  if(p.y<2.2 && ax<6.){ vec3 q = p-vec3(-2.6,.55,3.); q.xz = rot(.5)*q.xz; a = sdRBox(q, vec3(.85,.42,1.9), .18); a = min(a, sdRBox(q-vec3(0.,.55,-.2), vec3(.72,.3,.95), .15)); if(a<d.x) d = vec2(a,5.);
+    q = p-vec3(2.9,.5,-13.); q.xz = rot(-1.2)*q.xz; q.xy = rot(.25)*q.xy; a = sdRBox(q, vec3(.85,.42,1.9), .18); a = min(a, sdRBox(q-vec3(0.,.55,-.2), vec3(.72,.3,.95), .15)); if(a<d.x) d = vec2(a,5.); }
+  return d;
+}
+float mapd(vec3 p, float t){ vec3 b; return map(p,t,b).x; }
+vec3 calcN(vec3 p, float t, float dist){ vec2 e = vec2(1.,-1.)*max(.002, .0007*dist);
+  return normalize(e.xyy*mapd(p+e.xyy,t) + e.yyx*mapd(p+e.yyx,t) + e.yxy*mapd(p+e.yxy,t) + e.xxx*mapd(p+e.xxx,t)); }
+float shadow(vec3 p, float t, float soft){ float s = 1., d = .06;
+  for(int i=0;i<44;i++){ float h = mapd(p+SUN*d, t); if(soft>.5) s = min(s, 16.*h/d); else if(h<.004) return 0.;
+    d += clamp(h, .04, 4.); if(s<.01 || d>90.) break; }
+  return clamp(s,0.,1.); }
+float boxRow(vec3 p, float s, float k){ float cz = 11.+k*6., iz = floor(p.z/cz); vec3 q = p; q.z = p.z-(iz+.5)*cz; q.x -= s*(9.6+k*13.5);
+  float r1 = h21(vec2(iz, s*7.+k*3.)), r2 = h21(vec2(iz+31., s*5.+k)), r3 = h21(vec2(iz+77., s+k*9.));
+  float hh = k<.5 ? 3.6+7.5*r1*r1+2.2*r2 : 8.+10.*r1;
+  if(k<.5 && abs((iz+.5)*cz-MP.z)<13.) return max(cz*.5-abs(q.z),0.)+.45;
+  return min(sdBox(q-vec3(0.,hh-1.,0.), vec3(3.3+1.5*r2+k*1.6, hh-1., cz*.5-.9-1.3*r3)), max(cz*.5-abs(q.z), 0.)+.45); }
+float mapQ(vec3 p){ float s = p.x<0. ? -1. : 1.; float d = min(p.y, min(boxRow(p,s,0.), boxRow(p,s,1.)));
+  vec3 q = (p-MP)/MS; q.x = abs(q.x);
+  float m = min(sdBox(q-vec3(4.1,9.,0.), vec3(2.,9.,2.2)), sdBox(q-vec3(0.,25.5,0.), vec3(6.3,5.2,3.4)));
+  m = min(m, sdBox(q-vec3(9.2,23.,0.), vec3(2.6,7.5,2.6))); m = min(m, sdBox(q-vec3(0.,32.4,1.), vec3(2.,1.6,2.)));
+  return min(d, m*MS); }
+float shadowQ(vec3 p, float t){ float d = .5;                                    // 粗略的遮挡，只给空气里的光柱用
+  for(int i=0;i<10;i++){ float h = mapQ(p+SUN*d); if(h<.05) return 0.; d += max(h,1.); if(d>60.) break; } return 1.; }
+float ao(vec3 p, vec3 n, float t, float sc){ float o2 = 0., s = 1.;
+  for(int i=1;i<=4;i++){ float h = sc*.2*float(i); o2 += (h-mapd(p+n*h,t))*s/sc; s *= .7; } return clamp(1.-1.6*o2, 0., 1.); }
+
+vec3 sky(vec3 rd, float lvl){
+  if(lvl<1.) return vec3(.90,.87,.80);
+  if(lvl<3.) return vec3(.60,.58,.55);
+  float y = max(rd.y,0.), s = max(dot(rd,SUN),0.);
+  vec3 c = mix(vec3(.82,.56,.36), vec3(.24,.34,.42), pow(y,.42));
+  c += vec3(1.,.50,.20)*(.55*pow(s,3.)+1.3*pow(s,36.));
+  c += vec3(1.,.92,.78)*9.*smoothstep(.9990,.9997,s);
+  vec2 cp = rd.xz/(rd.y+.16); float sm = smoothstep(.35,.8, fbm(cp*vec2(.5,1.7)+3.));       // 高处拖长的烟
+  c = mix(c, vec3(.20,.19,.20)+vec3(.9,.4,.15)*.5*pow(s,5.), sm*.55*smoothstep(0.,.25,rd.y));
+  return c;
+}
+vec3 skyAmb(vec3 n){ return mix(vec3(.22,.15,.10), vec3(.30,.38,.44), .5+.5*n.y)*.85; }
+
+void material(vec3 p, vec3 n, float id, vec3 bid, float lvl, out vec3 alb, out float rough, out float metal, out float glass, inout vec3 nb){
+  rough = .9; metal = 0.; glass = 0.; bool tex = lvl>=2.;
+  if(id<.5){ alb = vec3(.46,.42,.37);                                                         // 地面
+    if(tex){ float road = smoothstep(4.6,3.9,abs(p.x)); float g = fbm(p.xz*1.3), g2 = vnoise(p.xz*9.);
+      vec3 asph = vec3(.11,.11,.115)*(.7+.6*g2)+.05*g; float ck = smoothstep(.035,.0,abs(vnoise(p.xz*.9)-.5))*smoothstep(.3,.6,vnoise(p.xz*.23+9.));
+      asph *= 1.-.75*ck; float dash = step(abs(p.x),.09)*step(.45,fract(p.z/4.))*smoothstep(.3,.7,vnoise(p.xz*2.));
+      asph = mix(asph, vec3(.62,.56,.40), dash*.75);
+      vec3 rub = mix(vec3(.30,.27,.24), vec3(.56,.52,.47), g2)*(.6+.7*g);
+      alb = mix(rub, asph, road); alb = mix(alb, vec3(.50,.42,.32), .4*smoothstep(.45,.75,fbm(p.xz*.5+20.)));      // 浮土
+      nb = normalize(nb + vec3(vnoise(p.xz*14.)-.5, 0., vnoise(p.xz*14.+5.)-.5)*.35); rough = .85; }
+  } else if(id<1.5){                                                                          // 楼
+    float r1 = h21(bid.xy*3.1+bid.z), r2 = h21(bid.xy*5.7+bid.z+2.);
+    vec3 tone = mix(vec3(.60,.58,.55), mix(vec3(.66,.58,.48), vec3(.44,.52,.52), r2), r1);
+    alb = tone;
+    if(tex){ bool side = abs(n.x)>.6, face = abs(n.z)>.6;
+      if(side || face){ vec2 uv = side ? vec2(p.z, p.y) : vec2(p.x, p.y); vec2 cell = vec2(.95+.35*r1, 1.0);
+        vec2 wi = floor(uv/cell), f = fract(uv/cell); float wr = h21(wi+bid.xy*13.+bid.z*7.);
+        float win = step(.17,f.x)*step(f.x,.83)*step(.24,f.y)*step(f.y,.82);
+        float st = fbm(vec2(uv.x*.9, uv.y*.11)+r1*9.); float dirt = fbm(uv*.35+r2*7.);
+        alb = tone*(.62+.5*dirt)*mix(1., .55, smoothstep(.5,.85,st)*.8);
+        alb *= mix(.55,1.,smoothstep(0.,6.,p.y));                                              // 越靠下越脏
+        alb = mix(alb, alb*.6, step(.93,f.y)+step(f.y,.05));                                    // 楼板线
+        if(win>.5){ if(wr<.42){ alb = vec3(.012); rough = 1.; }                                 // 碎掉的窗是个黑洞
+          else if(wr<.96){ alb = vec3(.03,.04,.05); glass = 1.; rough = .06; nb = normalize(nb + vec3(0., (h21(wi+.5)-.5)*.05, 0.)); }
+          else { alb = vec3(.30,.22,.14)*(.6+.6*vnoise(uv*vec2(3.,14.))); } }                    // 钉了木板的
+        else { float soot = smoothstep(.5,.0,f.y-.82)*step(.82,f.y)*step(h21(wi-vec2(0.,0.)+bid.xy*13.+bid.z*7.),.42); alb *= 1.-.6*soot*step(.17,f.x)*step(f.x,.83); }
+      } else { float sl = step(fract(p.y), .16); alb = mix(vec3(.10,.095,.09), vec3(.42,.40,.37), sl)*(.6+.6*vnoise(p.xz*3.)); }   // 断面：露出来的一层层楼板
+    }
+  } else if(id<2.5){ alb = vec3(.80,.40,.14); rough = .55;                                    // 机甲的装甲
+    if(tex){ vec3 q = (p-MP)/MS; vec3 pn = floor(q/vec3(2.1,1.7,2.1)); float pr = h21(pn.xy+pn.z*17.);
+      bool accent = (abs(q.x)>6.3 && q.y>25.2) || (abs(q.x)<4.1 && q.y>23.4 && q.y<29.2 && q.z>2.6) || (q.y<9.6 && q.z>1.95 && q.y>3.4) || (q.y<2.2 && q.z>2.4) || (q.y>31. && abs(q.x)<1.2 && q.z>1.);
+      vec3 base = accent ? vec3(.78,.30,.07) : vec3(.60,.60,.57)*(.82+.3*pr);
+      if(pr<.07 && !accent) base = vec3(.18,.19,.21);
+      vec3 f = fract(q/vec3(2.1,1.7,2.1)); float ln = min(min(f.x,1.-f.x)*2.1, min(f.y,1.-f.y)*1.7); ln = min(ln, min(f.z,1.-f.z)*2.1);
+      float rust = smoothstep(.42,.78, fbm(vec2(q.x*.7+q.z*.7, q.y*.16)+3.)+.25*vnoise(q.xy*3.));
+      float chip = smoothstep(.62,.82, vnoise(q.xy*5.+q.z*5.)*.6+vnoise(q.xy*17.+q.z*17.)*.4);
+      alb = mix(base, vec3(.30,.13,.05), rust*.7); alb = mix(alb, vec3(.34,.34,.36), chip*.7);
+      alb *= mix(.25,1.,smoothstep(.0,.07,ln));                                                 // 装甲板的缝
+      float hz = step(.5, fract((q.x+q.y)*.55))*step(27.2,q.y)*step(q.y,28.4)*step(6.,abs(q.x)); alb = mix(alb, mix(vec3(.85,.68,.10), vec3(.05), step(.5,fract((q.x+q.y)*.55+.25)))*(1.-rust*.6), hz*.0+step(27.2,q.y)*step(q.y,28.2)*step(6.4,abs(q.x))*.85);
+      alb *= mix(.7,1.,smoothstep(0.,14.,q.y));
+      rough = mix(.38,.85,rust); metal = (1.-rust)*.35*(1.-chip)+chip*.9; nb = normalize(nb + (vnoise(q.xy*9.+q.z*9.)-.5)*.10); }
+  } else if(id<3.5){ alb = vec3(.20,.20,.22); rough = .5; metal = .8;                         // 关节
+    if(tex){ vec3 q = (p-MP)/MS; alb = mix(vec3(.10,.10,.11), vec3(.30,.20,.12), smoothstep(.4,.8,fbm(q.xy*.8+q.z)))*(.6+.6*step(.5,fract(q.y*1.6))); rough = .45; }
+  } else if(id<4.5){ alb = vec3(.07,.07,.075); rough = .6;
+  } else if(id<5.5){ alb = vec3(.42,.16,.12); rough = .6;                                     // 废车
+    if(tex){ float ru = smoothstep(.35,.7,fbm(p.xz*2.+p.y*3.)); alb = mix(vec3(.36,.40,.42), vec3(.26,.11,.05), ru); rough = mix(.3,.9,ru); metal = .5*(1.-ru); }
+  } else { alb = vec3(.50,.47,.43); if(tex){ alb = mix(vec3(.28,.26,.24), vec3(.58,.55,.50), vnoise(p.xz*5.+p.y*5.)); } }
+}
+
+vec3 shadePoint(vec3 p, vec3 rd, float id, vec3 bid, float dist, float t, float lvl){
+  vec3 n = calcN(p,t,dist), nb = n, alb; float rough, metal, glass;
+  material(p, n, id, bid, lvl, alb, rough, metal, glass, nb);
+  if(lvl<1.) return alb;
+  float ndl = max(dot(nb,SUN),0.);
+  float sh = dot(n,SUN)>0. ? shadow(p+n*.03, t, lvl>=4.?1.:0.) : 0.;
+  vec3 dir = SUNC*ndl*sh*.32;
+  if(lvl<3.) return alb*(dir+.006);
+  float occ = lvl>=4. ? ao(p,n,t, id>1.5&&id<3.5 ? 3. : 1.)*mix(.6,1.,clamp(mapQ(p+n*4.)/4.,0.,1.)) : 1.;
+  vec3 v = -rd; float nv = max(dot(nb,v),0.);
+  vec3 F0 = mix(vec3(.04), alb, metal); if(glass>.5) F0 = vec3(.08);
+  vec3 F = F0+(1.-F0)*pow(1.-nv,5.)*(1.-rough*.7);
+  vec3 r = reflect(rd,nb); vec3 rc = r.y>0. ? sky(r,lvl) : vec3(.10,.08,.07);
+  rc = mix(rc, skyAmb(r)*1.2, smoothstep(.1,.8,rough));
+  vec3 hv = normalize(SUN+v); float sr = sqrt(rough);
+  vec3 spec = SUNC*pow(max(dot(nb,hv),0.), mix(500.,8.,sr))*mix(3.,.15,sr)*sh*step(0.,dot(n,SUN));
+  return alb*(1.-metal)*(dir+skyAmb(nb)*occ*.6)*(1.-F) + F*rc*occ*(glass>.5?1.4:1.) + F*spec;
+}
+
+// 空气：灰尘里有体积光。沿着视线走十几步，每一步问一次「这里照得到太阳吗」
+vec3 air(vec3 col, vec3 ro, vec3 rd, float dist, float t, float lvl, float jit){
+  if(lvl<5.) return col;
+  float D = min(dist, 110.), dt = D/9., tr = 1.; vec3 ins = vec3(0.);
+  float s = max(dot(rd,SUN),0.), phase = .22+.45*pow(s,2.)+1.5*pow(s,8.);
+  for(int i=0;i<9;i++){ vec3 p = ro+rd*(float(i)+jit)*dt;
+    float dens = .0062*exp(-max(p.y,0.)*.04)*(.75+.5*vnoise(p.xz*.12+vec2(t*.05,0.)));
+    float a = 1.-exp(-dens*dt);
+    ins += tr*a*(SUNC*.20*phase*shadowQ(p,t) + vec3(.20,.25,.32)*.55); tr *= 1.-a; }
+  return col*tr + ins;
+}
+// 飘着的灰：位置是（编号, t）的闭式函数，离镜头近的会被景深虚成一个个光斑
+vec3 ash(vec3 ro, vec3 rd, float dist, float t, float lvl){
+  if(lvl<5.) return vec3(0.);
+  vec3 c = camP(t), acc = vec3(0.);
+  for(int i=0;i<64;i++){ float fi = float(i), a = hpx(vec2(fi,1.7)), b = hpx(vec2(fi,4.1)), g = hpx(vec2(fi,8.3));
+    vec3 q = vec3((a-.5)*13.+.5*sin(t*.6+fi), mod(13.*b - t*(.35+.5*g), 13.), c.z - mod(27.*g + fi*3.7 - c.z*0., 27.) + 1.);
+    q.x += .4*sin(t*.9+fi*1.3);
+    vec3 v = q-ro; float tc = dot(v,rd); if(tc<.2 || tc>dist) continue;
+    float d2 = dot(v,v)-tc*tc, r = (.012+.02*a)*(1.+tc*.02);
+    acc += vec3(1.,.82,.60)*smoothstep(r*r, 0., d2)*(.5+1.6*a); }
+  return acc*.8;
+}
+// 绕着机甲的头飞的鸟
+float birds(vec3 p, float t){ float d = 1e9;
+  for(int i=0;i<11;i++){ float fi = float(i), a = hpx(vec2(fi,1.3)), b = hpx(vec2(fi,2.7));
+    float ph = t*(.22+.12*a)+fi*1.9, rr = 9.+7.*b;
+    vec3 bp = MP + vec3(cos(ph)*rr*1.3, 38.+6.*a+1.2*sin(t*.7+fi), sin(ph)*rr*.8+5.);
+    vec3 q = p-bp; if(dot(q,q)>4.){ d = min(d, length(q)-1.5); continue; }
+    q.xz = rot(-ph)*q.xz; float fl = sin(t*9.+fi*2.1)*.7;
+    float body = sdEll(q, vec3(.16,.14,.5)); vec3 w = q; w.x = abs(w.x); w.xy = rot(fl)*w.xy;
+    d = min(d, min(body, sdEll(w-vec3(.55,0.,0.), vec3(.6,.05,.24)))); }
+  return d; }
+
+vec3 shade(vec3 ro, vec3 rd, float t, float lvl, float jit){
+  float d = .02, id = -1.; vec3 bid = vec3(0.);
+  for(int i=0;i<170;i++){ vec3 b; vec2 h = map(ro+rd*d, t, b); if(h.x < .0009*d+.0006){ id = h.y; bid = b; break; } d += h.x; if(d>230.) break; }
+  float tb = -1.;
+  { float e = 25.; for(int i=0;i<34;i++){ float h = birds(ro+rd*e, t); if(h<.02){ tb = e; break; } e += h; if(e>130.) break; } }
+  vec3 col; float dist = id<0. ? 1e4 : d;
+  if(tb>0. && tb<dist){ col = lvl<1. ? vec3(.2) : vec3(.02,.02,.025); dist = tb; }
+  else if(id<0.) col = sky(rd,lvl);
+  else col = shadePoint(ro+rd*d, rd, id, bid, d, t, lvl);
+  col = air(col, ro, rd, dist, t, lvl, jit);
+  return col + ash(ro, rd, dist, t, lvl);
+}
+
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+  float lvl = fc.x<W ? LB : LA;
+  float ign = fract(52.9829189*fract(dot(fc+FR*vec2(5.588,3.1), vec2(.06711056,.00583715))));
+  float rnd = hpx(fc+FR*1.7);
+  vec3 acc = vec3(0.); float fn = float(NS);
+  for(int i=0;i<96;i++){ if(i>=NS) break;
+    float fi = float(i);
+    float u1 = fract(ign+fi*.61803398875), u2 = fract(rnd+fi*.7548776662);
+    vec2 uv = ((fc+vec2(u1,u2)-.5)*2.-R)/R.y;
+    float t = T; if(lvl>=7.) t += ((fi+u2)/fn)*(.5/FPS);               // 运动模糊
+    vec3 ro = camP(t), ta = MP+vec3(.6*sin(t*.23), 17.+.4*sin(t*.37), 0.);
+    vec3 fw = normalize(ta-ro), rt = normalize(cross(fw, vec3(0,1,0))), up = cross(rt,fw);
+    vec3 rd = normalize(uv.x*rt + uv.y*up + 1.42*fw);
+    if(lvl>=6.){                                                       // 景深：焦点在机甲身上
+      float rr = sqrt((fi+.5)/fn), ang = fi*2.39996323+ign*6.2831853;
+      vec2 lens = .035*rr*vec2(cos(ang), sin(ang));
+      vec3 fp = ro + rd*(60./dot(rd,fw));
+      ro += rt*lens.x + up*lens.y; rd = normalize(fp-ro); }
+    acc += min(shade(ro, rd, t, lvl, fract(ign+fi*.381966)), vec3(20.));
+  }
+  vec3 col = acc/fn;
+  vec2 uv0 = (fc*2.-R)/R.y;
+  if(lvl>=1.) col *= .70;
+  if(lvl>=8.){                                                         // 冲洗：色调映射、青橙调色、暗角、颗粒
+    col *= 1.05; col = col*(2.51*col+.03)/(col*(2.43*col+.59)+.14);
+    col = pow(clamp(col,0.,1.), vec3(1./2.2));
+    col = mix(col, col*col*(3.-2.*col), .9);
+    float lum = dot(col, vec3(.299,.587,.114));
+    col = mix(vec3(lum), col, 1.12);
+    col *= mix(vec3(.88,1.0,1.10), vec3(1.10,1.0,.88), smoothstep(.12,.75,lum));
+    col *= 1.-.34*dot(uv0*.52, uv0*.52);
+    col += (hpx(fc+FR*9.13)-.5)*.035;
+  } else col = pow(clamp(col,0.,1.), vec3(1./2.2));
+  if(W>0. && W<R.x && abs(fc.x-W)<1.5) col = vec3(1.);
+  o = vec4(col,1.);
+}`;
+window.SCENE = { FS, SEG: 2.4, TILES: 36, TX: 8,
+  NAMES: ['平涂：只有颜色', '加直射光和阴影', '加程序化贴图', '加天光和反射', '加软阴影和遮蔽', '加空气和光柱', '加景深', '加运动模糊', '加色调映射和颗粒'] };
+</script>
+<script src="harness.js"></script>
+</body></html>

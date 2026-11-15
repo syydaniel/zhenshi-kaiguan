@@ -1,0 +1,174 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{margin:0;background:#000;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh}
+#lab{position:fixed;left:4.2vw;bottom:6vh;color:#fff;font-family:"PingFang SC","Helvetica Neue",sans-serif;
+  text-shadow:0 2px 14px rgba(0,0,0,.55);display:flex;align-items:baseline;gap:1.6vw}
+#num{font:700 7.2vh/1 Menlo,monospace;color:#FFE14A}
+#txt{font-weight:600;font-size:4.4vh;letter-spacing:.04em}
+</style>
+</head><body><canvas id="c"></canvas>
+<div id="lab"><span id="num"></span><span id="txt"></span></div>
+<script>
+// 真实感开关 · 示例一：桌面静物（陶瓷球、弹跳的橡胶球、旋转的金属环、木桌、墙）。同一个镜头，逐级打开渲染手法。
+// 画面 = 时间的纯函数。参数：?level=0..7 固定某一级；不带 level 时按时间逐级打开。?ns=每像素采样数（预览 4，出片 24 以上）。?label=0 去掉左下角的字。
+const FS = `uniform vec2 R; uniform float T, LA, LB, W, FR; uniform int NS;
+out vec4 o;
+const vec3 L = vec3(0.5507, 0.7210, 0.4206);          // 主光方向（窗外的太阳）
+const vec3 KEY = vec3(1.0, 0.92, 0.78) * 3.4;
+const vec3 C1 = vec3(-1.6, 0.72, -0.25);              // 陶瓷球
+const vec3 C3 = vec3(1.8, 0.80, -0.8);                // 金属环
+const vec3 C5 = vec3(1.25, 0.25, 1.55);               // 前景小方块
+const float FPS = 24.0;
+
+float h11(float p){ return fract(sin(p*127.1)*43758.5453); }
+float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(h21(i),h21(i+vec2(1,0)),f.x), mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x), f.y); }
+float fbm(vec2 p){ float a=.5, s=0.; for(int i=0;i<4;i++){ s+=a*vnoise(p); p=p*2.03+17.; a*=.5; } return s; }
+mat2 rot(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }
+
+// 所有运动都是 t 的闭式函数
+vec3 ballP(float t){ return vec3(-0.05+0.5*sin(t*0.9), 0.42+1.35*abs(sin(t*5.0)), 0.7+0.2*cos(t*0.9)); }
+float sdTorus(vec3 p, vec2 t){ vec2 q=vec2(length(p.xy)-t.x, p.z); return length(q)-t.y; }
+float sdRBox(vec3 p, vec3 b, float r){ vec3 q=abs(p)-b; return length(max(q,0.))+min(max(q.x,max(q.y,q.z)),0.)-r; }
+
+vec2 map(vec3 p, float t){                             // 返回（距离，材质编号）
+  vec2 d = vec2(p.y, 0.);                              // 0 桌面
+  float w = p.z+3.2; if(w<d.x) d=vec2(w,1.);           // 1 墙
+  float s1 = length(p-C1)-.72; if(s1<d.x) d=vec2(s1,2.);            // 2 陶瓷球
+  float s2 = length(p-ballP(t))-.42; if(s2<d.x) d=vec2(s2,3.);      // 3 橡胶球
+  vec3 q=p-C3; q.xz=rot(t*3.0)*q.xz; float s3=sdTorus(q, vec2(.55,.2)); if(s3<d.x) d=vec2(s3,4.);   // 4 金属环
+  vec3 b=p-C5; b.xz=rot(.5)*b.xz; float s4=sdRBox(b, vec3(.2), .05); if(s4<d.x) d=vec2(s4,5.);      // 5 小方块
+  return d;
+}
+vec3 calcN(vec3 p, float t){ vec2 e=vec2(1.,-1.)*.0012;
+  return normalize(e.xyy*map(p+e.xyy,t).x + e.yyx*map(p+e.yyx,t).x + e.yxy*map(p+e.yxy,t).x + e.xxx*map(p+e.xxx,t).x); }
+
+// 材质：lvl>=2 才有贴图（颜色变化、法线起伏、粗糙度变化），否则是纯色
+void material(vec3 x, float id, float t, float lvl, inout vec3 n, out vec3 alb, out float rough, out float metal){
+  bool tex = lvl >= 2.; metal = 0.;
+  if(id<.5){ alb=vec3(.46,.29,.16); rough=.45;
+    if(tex){ float pw=.85, pid=floor(x.z/pw), fz=fract(x.z/pw), off=h11(pid)*10.;
+      float g=fbm(vec2((x.x+off)*1.1, x.z*9.)), st=vnoise(vec2((x.x+off)*2.5, x.z*70.));
+      alb=mix(vec3(.55,.35,.19), vec3(.27,.15,.075), smoothstep(.25,.8,g*.7+st*.3));
+      alb*=.82+.36*h11(pid+3.1);
+      float gap=smoothstep(0.,.02,fz)*smoothstep(1.,.98,fz);
+      alb*=mix(.22,1.,gap); rough=mix(.22,.6,g);
+      n=normalize(n+vec3((st-.5)*.07, 0., (g-.5)*.12+(1.-gap)*(fz<.5?-1.:1.)*.45)); }
+  } else if(id<1.5){ alb=vec3(.74,.72,.68); rough=.9;
+    if(tex){ float m=fbm(x.xy*.7+3.), f=vnoise(x.xy*24.);
+      alb*=.80+.34*m; alb=mix(alb, alb*vec3(1.,.96,.88), f*.35);
+      n=normalize(n+vec3((f-.5)*.08, (vnoise(x.xy*24.+7.)-.5)*.08, 0.)); }
+  } else if(id<2.5){ alb=vec3(.84,.86,.88); rough=.07;
+    if(tex){ vec3 q=x-C1; float sp=step(.95, h21(floor(q.xy*46.)+floor(q.z*46.)*1.7));
+      alb=mix(alb, vec3(.30,.36,.48), sp*.6); alb*=.86+.14*smoothstep(-.7,.7,q.y); }
+  } else if(id<3.5){ alb=vec3(.86,.20,.08); rough=.55;
+    if(tex){ vec3 q=x-ballP(t); q.xy=rot(t*5.)*q.xy; q.yz=rot(.6)*q.yz;
+      alb=mix(alb, vec3(.95,.93,.88), smoothstep(.075,.055,abs(q.y)));
+      alb*=.9+.2*vnoise(q.xz*34.); rough=.5; }
+  } else if(id<4.5){ alb=vec3(1.,.77,.34); rough=.3; metal=1.;
+    if(tex){ vec3 q=x-C3; q.xz=rot(t*3.0)*q.xz; float br=vnoise(vec2(atan(q.y,q.x)*70., length(q.xy)*9.));
+      rough=mix(.14,.4,br); n=normalize(n+(br-.5)*.06); }
+  } else { alb=vec3(.10,.27,.58); rough=.5;
+    if(tex){ alb*=.82+.36*vnoise(x.xz*20.+x.y*20.); } }
+}
+
+// 窗框的投影：主光只从一扇窗进来，窗棂在桌面和墙上留下影子
+float windowMask(vec3 x, float soft){
+  vec3 a=normalize(cross(L, vec3(0,1,0))), b=cross(a,L);
+  vec2 q=vec2(dot(x,a), dot(x,b))-vec2(.1,.3);
+  vec2 hs=vec2(2.6,1.9); float e=mix(.012,.11,soft);
+  float m=smoothstep(hs.x+e, hs.x-e, abs(q.x))*smoothstep(hs.y+e, hs.y-e, abs(q.y));
+  float bar=min(smoothstep(.05-e,.05+e,abs(q.x)), smoothstep(.05-e,.05+e,abs(q.y)));
+  return m*bar;
+}
+float hardShadow(vec3 ro, float t){ float d=.02;
+  for(int i=0;i<48;i++){ float h=map(ro+L*d,t).x; if(h<.002) return 0.; d+=h; if(d>10.) break; } return 1.; }
+float softShadow(vec3 ro, float t){ float s=1., d=.03;
+  for(int i=0;i<48;i++){ float h=map(ro+L*d,t).x; s=min(s, 9.*h/d); d+=clamp(h,.02,.28); if(h<.001||d>10.) break; }
+  return clamp(s,0.,1.); }
+float ao(vec3 x, vec3 n, float t){ float o=0., s=1.;
+  for(int i=0;i<5;i++){ float h=.03+.12*float(i); o+=(h-map(x+n*h,t).x)*s; s*=.72; } return clamp(1.-2.4*o,0.,1.); }
+// 房间环境：昏暗的墙和天花板，加一扇很亮的窗
+vec3 env(vec3 d){ vec3 c=mix(vec3(.50,.45,.40), vec3(.36,.43,.56), smoothstep(-.1,.6,d.y))*.42;
+  c+=vec3(1.,.95,.85)*8.*smoothstep(.90,.975,dot(d,L));
+  if(d.y<0.) c=mix(c, vec3(.2,.13,.08)*.45, smoothstep(0.,-.3,d.y)); return c; }
+vec3 ambient(vec3 n){ return mix(vec3(.17,.115,.07), vec3(.30,.33,.40), .5+.5*n.y)*1.1; }
+
+vec3 reflCol(vec3 ro, vec3 rd, float t, float lvl){     // 反射光线打到的东西，用简化光照
+  float d=.02, id=-1.;
+  for(int i=0;i<56;i++){ vec2 h=map(ro+rd*d,t); if(h.x<.003){ id=h.y; break; } d+=h.x; if(d>14.) break; }
+  if(id<0.) return env(rd);
+  vec3 x=ro+rd*d, n=calcN(x,t), alb; float rough, metal; material(x,id,t,lvl,n,alb,rough,metal);
+  float ndl=max(dot(n,L),0.), sh=hardShadow(x+n*.02,t);
+  if(metal>.5) return alb*(ambient(reflect(rd,n))*2.+KEY*.15*ndl*sh);
+  return alb*(KEY*ndl*sh*windowMask(x,1.)+ambient(n));
+}
+
+vec3 shade(vec3 ro, vec3 rd, float t, float lvl){
+  float d=0., id=-1.;
+  for(int i=0;i<120;i++){ vec2 h=map(ro+rd*d,t); if(h.x<.0012*d+.0004){ id=h.y; break; } d+=h.x; if(d>40.) break; }
+  if(id<0.) return env(rd);
+  vec3 x=ro+rd*d, n=calcN(x,t), alb; float rough, metal; material(x,id,t,lvl,n,alb,rough,metal);
+  if(lvl<1.) return alb*.8;                                           // 0 平涂
+  float ndl=max(dot(n,L),0.);
+  float sh = lvl>=4. ? softShadow(x+n*.012,t) : hardShadow(x+n*.012,t);
+  float win = windowMask(x, lvl>=4. ? 1. : 0.);
+  vec3 dir = KEY*ndl*sh*win;
+  if(lvl<3.) return alb*(dir+vec3(.035));                             // 1、2 只有直射光
+  float occ = lvl>=4. ? ao(x,n,t) : 1.;
+  vec3 amb = ambient(n)*occ;
+  vec3 v=-rd; float nv=max(dot(n,v),0.);
+  vec3 F0=mix(vec3(.04), alb, metal);
+  vec3 F=F0+(1.-F0)*pow(1.-nv,5.)*(1.-rough*.75);
+  vec3 r=reflect(rd,n);
+  vec3 rc=reflCol(x+n*.02, r, t, lvl);
+  rc=mix(rc, ambient(r)*1.3, smoothstep(.12,.75,rough));              // 越粗糙，反射越糊
+  vec3 hv=normalize(L+v); float sr=sqrt(rough);
+  vec3 spec=KEY*pow(max(dot(n,hv),0.), mix(700.,10.,sr))*mix(5.,.2,sr)*sh*win*step(0.,dot(n,L));
+  vec3 col=alb*(1.-metal)*(dir+amb)*(1.-F) + F*rc*mix(.55,1.,occ) + F*spec;
+  return min(col, vec3(14.));
+}
+
+void main(){
+  vec2 fc=gl_FragCoord.xy;
+  float lvl = fc.x<W ? LB : LA;
+  float ign=fract(52.9829189*fract(dot(fc+FR*vec2(5.588,3.1), vec2(.06711056,.00583715))));
+  float rnd=h21(fc+FR*1.7);
+  vec3 acc=vec3(0.); float fn=float(NS);
+  for(int i=0;i<96;i++){ if(i>=NS) break;
+    float fi=float(i);
+    float u1=fract(ign+fi*.61803398875), u2=fract(rnd+fi*.7548776662);
+    vec2 uv=((fc+vec2(u1,u2)-.5)*2.-R)/R.y;
+    float t=T; if(lvl>=6.) t+=((fi+u2)/fn)*(.5/FPS);                  // 6 运动模糊：180° 快门内取多个时间点
+    vec3 ro=vec3(.9*sin(t*.22), 1.55, 6.2), ta=vec3(0.,.72,0.);
+    vec3 fw=normalize(ta-ro), rt=normalize(cross(fw, vec3(0,1,0))), up=cross(rt,fw);
+    vec3 rd=normalize(uv.x*rt+uv.y*up+2.6*fw);
+    if(lvl>=5.){                                                      // 5 景深：薄透镜，焦点在弹跳的球
+      float rr=sqrt((fi+.5)/fn), ang=fi*2.39996323+ign*6.2831853;
+      vec2 lens=.13*rr*vec2(cos(ang), sin(ang));
+      vec3 fp=ro+rd*(5.6/dot(rd,fw));
+      ro+=rt*lens.x+up*lens.y; rd=normalize(fp-ro); }
+    acc+=shade(ro, rd, t, lvl);
+  }
+  vec3 col=acc/fn;
+  vec2 uv0=(fc*2.-R)/R.y;
+  if(lvl>=1.) col*=.46;                                               // 曝光
+  if(lvl>=7.){                                                        // 7 色调映射、调色、暗角、颗粒
+    col*=1.12; col=col*(2.51*col+.03)/(col*(2.43*col+.59)+.14);
+    col=pow(clamp(col,0.,1.), vec3(1./2.2));
+    col=mix(col, col*col*(3.-2.*col), .5);
+    col=mix(vec3(dot(col, vec3(.299,.587,.114))), col, 1.12);
+    col*=vec3(1.02,1.,.965);
+    col*=1.-.30*dot(uv0*.52, uv0*.52);
+    col+=(h21(fc+FR*9.13)-.5)*.035;
+  } else col=pow(clamp(col,0.,1.), vec3(1./2.2));
+  if(W>0. && W<R.x && abs(fc.x-W)<1.5) col=vec3(1.);                  // 擦除线
+  o=vec4(col,1.);
+}`;
+window.SCENE = { FS, SEG: 2.6, NAMES: ['平涂：只有颜色', '加直射光和阴影', '加程序化贴图', '加环境光和反射', '加软阴影和接触阴影', '加景深', '加运动模糊', '加色调映射和颗粒'] };
+</script>
+<script src="harness.js"></script>
+</body></html>
