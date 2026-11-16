@@ -296,7 +296,8 @@ void main(){
     vec3 rd = normalize(uv.x*rt + uv.y*up + 1.42*fw);
     if(lvl>=6.){                                                       // 景深：焦点在机甲身上
       float rr = sqrt((fi+.5)/fn), ang = fi*2.39996323+ign*6.2831853;
-      vec2 lens = .035*rr*vec2(cos(ang), sin(ang));
+      // 光圈半径由镜头算：这个镜头是 1.42*fw，相当于全画幅 17 毫米（0.012 米 × 1.42）；f/4 → 0.017 ÷ 4 ÷ 2。场景单位是米
+      vec2 lens = (.012*1.42/(2.*4.))*rr*vec2(cos(ang), sin(ang));
       vec3 fp = ro + rd*(60./dot(rd,fw));
       ro += rt*lens.x + up*lens.y; rd = normalize(fp-ro); }
     acc += min(shade(ro, rd, t, lvl, fract(ign+fi*.381966)), vec3(20.));

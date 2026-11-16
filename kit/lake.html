@@ -259,7 +259,8 @@ void main(){
     vec3 rd = normalize(uv.x*rt + uv.y*up + 1.75*fw);
     if(lvl>=6.){                                                       // 景深：焦点在远处的山，船头是虚的
       float rr = sqrt((fi+.5)/fn), ang = fi*2.39996323+ign*6.2831853;
-      vec2 lens = .008*rr*vec2(cos(ang), sin(ang));
+      // 光圈半径由镜头算：1.75*fw 相当于全画幅 21 毫米；f/4 → 0.021 ÷ 4 ÷ 2。场景单位按米，近处的船头离镜头不到一米
+      vec2 lens = (.012*1.75/(2.*4.))*rr*vec2(cos(ang), sin(ang));
       vec3 fp = ro + rd*(30./dot(rd,fw));
       ro += rt*lens.x + up*lens.y; rd = normalize(fp-ro); }
     acc += min(shade(ro, rd, t, lvl), vec3(20.));

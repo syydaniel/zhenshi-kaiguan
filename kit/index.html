@@ -148,7 +148,8 @@ void main(){
     vec3 rd=normalize(uv.x*rt+uv.y*up+2.6*fw);
     if(lvl>=5.){                                                      // 5 景深：薄透镜，焦点在弹跳的球
       float rr=sqrt((fi+.5)/fn), ang=fi*2.39996323+ign*6.2831853;
-      vec2 lens=.13*rr*vec2(cos(ang), sin(ang));
+      // 光圈半径由镜头算：2.6*fw 相当于全画幅 31 毫米；f/2.8 → 0.031 ÷ 2.8 ÷ 2 = 0.0056 米。这个场景 1 个单位是 10 厘米，所以乘 10
+      vec2 lens=(10.*.012*2.6/(2.*2.8))*rr*vec2(cos(ang), sin(ang));
       vec3 fp=ro+rd*(5.6/dot(rd,fw));
       ro+=rt*lens.x+up*lens.y; rd=normalize(fp-ro); }
     acc+=shade(ro, rd, t, lvl);

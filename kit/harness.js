@@ -2,6 +2,7 @@
 // 页面先设 window.SCENE = { FS, NAMES, BAKE（可选，烘焙高度图的片元着色器）, BAKE_SIZE, SEG }，再加载本文件。
 // 画面 = 时间的纯函数：render(t) 只依赖 t，不用 Date.now()、不用无种子随机、不保留上一帧状态。
 // 参数：?level=N 固定某一级；不带 level 时按时间逐级打开。?ns=每像素采样数。?label=0 去掉左下角的字。
+//      ?clay=1 灰模（着色器里声明 uniform float CLAY，自己把材质换成中灰、关掉景深）。?debug=N 调试视图（uniform int DBG）。?tiles=、?tx= 分块数。
 (function () {
   const S = window.SCENE, Q = new URLSearchParams(location.search);
   const NS = +(Q.get('ns') || 4), FIXED = Q.has('level') ? +Q.get('level') : -1, SHOWLAB = Q.get('label') !== '0';
@@ -60,6 +61,7 @@
     gl.viewport(0, 0, c.width, c.height);
     gl.uniform2f(U('R'), c.width, c.height); gl.uniform1f(U('T'), lv.ts === undefined ? t : lv.ts);
     gl.uniform1f(U('LA'), lv.a); gl.uniform1f(U('LB'), lv.b); gl.uniform1f(U('W'), lv.wpx !== undefined ? lv.wpx : lv.w >= 1 ? c.width + 9 : lv.w * c.width);
+    gl.uniform1f(U('CLAY'), +(Q.get('clay') || 0)); gl.uniform1i(U('DBG'), +(Q.get('debug') || 0));   // ?clay=1 灰模，?debug=N 调试视图；着色器里没声明这两个 uniform 就不起作用
     gl.uniform1f(U('FR'), Math.round(t * 24) % 4096); gl.uniform1i(U('NS'), lv.ns || NS); if (S.BAKE) gl.uniform1i(U('HM'), 0);
     gl.enable(gl.SCISSOR_TEST);                          // 分条画，避免单次绘制太久被显卡看门狗打断
     for (let i = 0; i < TILES; i++) for (let j = 0; j < TX; j++) { const y0 = Math.floor(c.height * i / TILES), y1 = Math.floor(c.height * (i + 1) / TILES), x0 = Math.floor(c.width * j / TX), x1 = Math.floor(c.width * (j + 1) / TX);
